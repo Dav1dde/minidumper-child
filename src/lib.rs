@@ -2,6 +2,7 @@ use std::{
     path::{Path, PathBuf},
     process,
     sync::Arc,
+    time::Duration,
 };
 
 pub mod client;
@@ -34,9 +35,10 @@ pub type OnMessage = Box<dyn Fn(u32, Vec<u8>) + Send + Sync + 'static>;
 
 pub struct MinidumperChild {
     crashes_dir: PathBuf,
-    server_stale_timeout: u64,
-    client_connect_timeout: u64,
-    server_arg: String,
+    server_stale_timeout: Duration,
+    client_connect_timeout: Duration,
+    server_args: Option<Vec<String>>,
+    server_env: String,
     on_minidump: Option<OnMinidump>,
     on_message: Option<OnMessage>,
 }
@@ -45,9 +47,10 @@ impl Default for MinidumperChild {
     fn default() -> Self {
         Self {
             crashes_dir: std::env::temp_dir().join("Crashes"),
-            server_stale_timeout: 5000,
-            client_connect_timeout: 3000,
-            server_arg: "--crash-reporter-server".to_string(),
+            server_stale_timeout: Duration::from_millis(5000),
+            client_connect_timeout: Duration::from_millis(3000),
+            server_args: None,
+            server_env: "_CRASH_REPORTER_SERVER".to_owned(),
             on_minidump: None,
             on_message: None,
         }
@@ -60,10 +63,12 @@ impl MinidumperChild {
         Self::default()
     }
 
+    /// Returns whether the current process is the crash reporting server process.
     pub fn is_crash_reporter_process(&self) -> bool {
-        std::env::args().any(|arg| arg.starts_with(&self.server_arg))
+        std::env::var_os(&self.server_env).is_some()
     }
 
+    /// Configures a callback which is invoked with the generated minidump on crash.
     #[must_use = "You should call spawn() or the crash reporter won't be enabled"]
     pub fn on_minidump<F>(mut self, on_minidump: F) -> Self
     where
@@ -73,6 +78,9 @@ impl MinidumperChild {
         self
     }
 
+    /// Configures a callback which is invoked with messages from the app process.
+    ///
+    /// A message may be sent using [`ClientHandle::send_message`].
     #[must_use = "You should call spawn() or the crash reporter won't be enabled"]
     pub fn on_message<F>(mut self, on_message: F) -> Self
     where
@@ -82,27 +90,49 @@ impl MinidumperChild {
         self
     }
 
+    /// Configures the directory where crash dumps will be stored.
     #[must_use = "You should call spawn() or the crash reporter won't be enabled"]
     pub fn with_crashes_dir(mut self, crashes_dir: PathBuf) -> Self {
         self.crashes_dir = crashes_dir;
         self
     }
 
+    /// Configures the server stale timeout.
+    ///
+    /// The server expects periodic messages from the client process, if it does not receive
+    /// a message within `timeout`, it considers the connection broken and detach.
     #[must_use = "You should call spawn() or the crash reporter won't be enabled"]
-    pub fn with_server_stale_timeout(mut self, server_stale_timeout: u64) -> Self {
-        self.server_stale_timeout = server_stale_timeout;
+    pub fn with_server_stale_timeout(mut self, timeout: Duration) -> Self {
+        self.server_stale_timeout = timeout;
         self
     }
 
+    /// Configures the client connect timeout.
+    ///
+    /// This is the amount of time the client will wait to establish a connection to the server.
     #[must_use = "You should call spawn() or the crash reporter won't be enabled"]
-    pub fn with_client_connect_timeout(mut self, client_connect_timeout: u64) -> Self {
-        self.client_connect_timeout = client_connect_timeout;
+    pub fn with_client_connect_timeout(mut self, timeout: Duration) -> Self {
+        self.client_connect_timeout = timeout;
         self
     }
 
+    /// Adds an argument to the list of arguments the server process will be invoked with.
+    ///
+    /// This can be called multiple times to add multiple arguments. When specifying no arguments
+    /// the current process' list of arguments is used.
     #[must_use = "You should call spawn() or the crash reporter won't be enabled"]
     pub fn with_server_arg(mut self, server_arg: String) -> Self {
-        self.server_arg = server_arg;
+        let args = self.server_args.get_or_insert_default();
+        args.push(server_arg);
+        self
+    }
+
+    /// Configures the name of an environment variable which is passed to the server process.
+    ///
+    /// This defaults to `_CRASH_REPORTER_SERVER`.
+    #[must_use = "You should call spawn() or the crash reporter won't be enabled"]
+    pub fn with_server_env_var(mut self, name: String) -> Self {
+        self.server_env = name;
         self
     }
 
@@ -112,11 +142,7 @@ impl MinidumperChild {
             panic!("You should set one of 'on_minidump' or 'on_message'");
         }
 
-        let server_socket = std::env::args()
-            .find(|arg| arg.starts_with(&self.server_arg))
-            .and_then(|arg| arg.split('=').next_back().map(|arg| arg.to_string()));
-
-        if let Some(socket_name) = server_socket {
+        if let Some(socket_name) = std::env::var(&self.server_env).ok() {
             let socket_name = minidumper::SocketName::path(&socket_name);
 
             server::start(
@@ -137,9 +163,14 @@ impl MinidumperChild {
 
             std::env::current_exe()
                 .and_then(|current_exe| {
-                    process::Command::new(current_exe)
-                        .arg(format!("{}={}", &self.server_arg, socket_name))
-                        .spawn()
+                    let mut process = process::Command::new(current_exe);
+                    process.env(self.server_env, &socket_name);
+                    match self.server_args {
+                        Some(args) => process.args(args),
+                        // Skip arg0, the "name" of the process
+                        None => process.args(std::env::args().skip(1)),
+                    };
+                    process.spawn()
                 })
                 .map_err(Error::from)
                 .and_then(|server_process| {
