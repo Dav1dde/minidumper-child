@@ -30,6 +30,7 @@ impl ClientHandle {
     }
 }
 
+pub type OnProcess = Box<dyn FnOnce(&mut process::Command) + Send + Sync + 'static>;
 pub type OnMinidump = Box<dyn Fn(Vec<u8>, &Path) + Send + Sync + 'static>;
 pub type OnMessage = Box<dyn Fn(u32, Vec<u8>) + Send + Sync + 'static>;
 
@@ -37,8 +38,8 @@ pub struct MinidumperChild {
     crashes_dir: PathBuf,
     server_stale_timeout: Duration,
     client_connect_timeout: Duration,
-    server_args: Option<Vec<String>>,
     server_env: String,
+    on_process: Option<OnProcess>,
     on_minidump: Option<OnMinidump>,
     on_message: Option<OnMessage>,
 }
@@ -49,8 +50,8 @@ impl Default for MinidumperChild {
             crashes_dir: std::env::temp_dir().join("Crashes"),
             server_stale_timeout: Duration::from_millis(5000),
             client_connect_timeout: Duration::from_millis(3000),
-            server_args: None,
             server_env: "_CRASH_REPORTER_SERVER".to_owned(),
+            on_process: None,
             on_minidump: None,
             on_message: None,
         }
@@ -66,6 +67,16 @@ impl MinidumperChild {
     /// Returns whether the current process is the crash reporting server process.
     pub fn is_crash_reporter_process(&self) -> bool {
         std::env::var_os(&self.server_env).is_some()
+    }
+
+    /// Configures a callback which can be used to modify the server process.
+    #[must_use = "You should call spawn() or the crash reporter won't be enabled"]
+    pub fn on_process<F>(mut self, on_process: F) -> Self
+    where
+        F: FnOnce(&mut process::Command) + Send + Sync + 'static,
+    {
+        self.on_process = Some(Box::new(on_process));
+        self
     }
 
     /// Configures a callback which is invoked with the generated minidump on crash.
@@ -116,17 +127,6 @@ impl MinidumperChild {
         self
     }
 
-    /// Adds an argument to the list of arguments the server process will be invoked with.
-    ///
-    /// This can be called multiple times to add multiple arguments. When specifying no arguments
-    /// the current process' list of arguments is used.
-    #[must_use = "You should call spawn() or the crash reporter won't be enabled"]
-    pub fn with_server_arg(mut self, server_arg: String) -> Self {
-        let args = self.server_args.get_or_insert_default();
-        args.push(server_arg);
-        self
-    }
-
     /// Configures the name of an environment variable which is passed to the server process.
     ///
     /// This defaults to `_CRASH_REPORTER_SERVER`.
@@ -164,12 +164,11 @@ impl MinidumperChild {
             std::env::current_exe()
                 .and_then(|current_exe| {
                     let mut process = process::Command::new(current_exe);
+                    if let Some(on_process) = self.on_process {
+                        on_process(&mut process);
+                    }
+                    // Always set this last, so an accidental `env_clear()` doesn't remove it.
                     process.env(self.server_env, &socket_name);
-                    match self.server_args {
-                        Some(args) => process.args(args),
-                        // Skip arg0, the "name" of the process
-                        None => process.args(std::env::args().skip(1)),
-                    };
                     process.spawn()
                 })
                 .map_err(Error::from)
