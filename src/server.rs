@@ -91,7 +91,7 @@ where
 pub fn start<Minidump, Message>(
     socket_name: SocketName,
     crashes_dir: PathBuf,
-    stale_timeout: u64,
+    stale_timeout: Duration,
     on_minidump: Option<Minidump>,
     on_message: Option<Message>,
 ) -> Result<(), Error>
@@ -104,7 +104,7 @@ where
         .and_then(|mut server| {
             let handler = Box::new(Handler::new(crashes_dir, on_minidump, on_message));
             let shutdown = AtomicBool::new(false);
-            let stale_timeout = Some(Duration::from_millis(stale_timeout));
+            let stale_timeout = Some(stale_timeout);
 
             server
                 .run(handler, &shutdown, stale_timeout)

@@ -5,11 +5,11 @@ use std::{sync::Arc, time::Duration};
 
 pub fn start(
     socket_name: SocketName,
-    connect_timeout: u64,
+    connect_timeout: Duration,
     #[allow(unused_variables)] server_pid: u32,
-    server_poll: u64,
+    server_poll: Duration,
 ) -> Result<(Arc<Client>, CrashHandler), Error> {
-    let mut wait_time = 0;
+    let mut wait_time = Duration::ZERO;
 
     // Loop until we have a client or return error if connect_timeout is reached
     let client = loop {
@@ -17,8 +17,9 @@ pub fn start(
             Ok(client) => break client,
             Err(e) => {
                 if wait_time < connect_timeout {
-                    std::thread::sleep(Duration::from_millis(50));
-                    wait_time += 50;
+                    let wait = Duration::from_millis(50);
+                    std::thread::sleep(wait);
+                    wait_time += wait;
                 } else {
                     return Err(Error::from(e));
                 }
@@ -30,7 +31,7 @@ pub fn start(
     std::thread::spawn({
         let client = client.clone();
         move || loop {
-            std::thread::sleep(Duration::from_millis(server_poll));
+            std::thread::sleep(server_poll);
 
             if client.ping().is_err() {
                 break;
