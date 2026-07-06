@@ -112,8 +112,6 @@ impl MinidumperChild {
             panic!("You should set one of 'on_minidump' or 'on_message'");
         }
 
-        std::fs::create_dir_all(&self.crashes_dir)?;
-
         let server_socket = std::env::args()
             .find(|arg| arg.starts_with(&self.server_arg))
             .and_then(|arg| arg.split('=').next_back().map(|arg| arg.to_string()));
@@ -135,7 +133,7 @@ impl MinidumperChild {
         } else {
             // We use a unique socket name because we don't share the crash reporter
             // processes between different instances of the app.
-            let socket_name = make_socket_name(&self.crashes_dir, uuid::Uuid::new_v4());
+            let socket_name = make_socket_name(uuid::Uuid::new_v4());
 
             std::env::current_exe()
                 .and_then(|current_exe| {
@@ -161,7 +159,8 @@ impl MinidumperChild {
     }
 }
 
-pub fn make_socket_name(base_dir: &Path, session_id: uuid::Uuid) -> String {
-    let td = base_dir.join(format!("temp-socket-{}", session_id.simple()));
+pub fn make_socket_name(session_id: uuid::Uuid) -> String {
+    let mut td = std::env::temp_dir();
+    td.push(format!("temp-socket-{}", session_id.simple()));
     td.to_string_lossy().to_string()
 }
